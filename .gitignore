@@ -12,6 +12,8 @@ wheels/
 # Environments & Logs
 .env
 balance_history.csv
+trade_history.csv
+positions.json
 *.log
 .idea/
 .vscode/

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\admin\\\\PycharmProjects\\\\auto_turtle_trading\" -Recurse -File)",
+      "Bash(Select-Object FullName)"
+    ]
+  }
+}

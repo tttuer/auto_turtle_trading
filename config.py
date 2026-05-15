@@ -28,6 +28,10 @@ class Config:
     RISK_PERCENT = 0.01  # 1%
     MAX_UNITS = 4
     
+    # Telegram
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
     # Universe
     @classmethod
     def get_universe(cls):

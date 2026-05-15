@@ -1,6 +1,10 @@
+import json
+import os
 import pandas as pd
 import time
 from config import Config
+
+POSITIONS_FILE = "positions.json"
 
 class TurtleStrategy:
     def __init__(self, kis_client):
@@ -81,29 +85,64 @@ class TurtleStrategy:
                 print(f"[{symbol}] N: {inds['n']:.2f}, 20H: {inds['high_20']}, 10L: {inds['low_10']}, 1 Unit: {unit_size}주")
         
         # 2. 현재 보유 중인 종목 상태 동기화
+        saved_positions = self._load_saved_positions()
         for holding in balance_info['holdings']:
             sym = holding['pdno']
             if sym in self.state:
                 qty = int(holding['hldg_qty'])
                 avg_price = float(holding['pchs_avg_pric'])
                 if qty > 0:
-                    unit_size = self.state[sym]['unit_size']
-                    units_held = max(1, qty // unit_size) if unit_size > 0 else 1
-                    
-                    self.state[sym]['total_qty'] = qty
-                    self.state[sym]['units_held'] = units_held
-                    self.state[sym]['last_entry_price'] = avg_price
-                    # 손절매: 마지막 진입가 - 2N
-                    self.state[sym]['stop_loss'] = avg_price - (2 * self.state[sym]['n'])
-                    print(f"[{sym}] Sync: Holding {qty} shares ({units_held} units). Avg: {avg_price}, SL: {self.state[sym]['stop_loss']:.0f}")
+                    if sym in saved_positions:
+                        # 저장된 파일 우선 적용 (피라미딩 차수 및 정확한 손절가 복원)
+                        saved = saved_positions[sym]
+                        self.state[sym]['total_qty'] = qty  # 실제 보유 수량은 증권사 기준
+                        self.state[sym]['units_held'] = saved['units_held']
+                        self.state[sym]['last_entry_price'] = saved['last_entry_price']
+                        self.state[sym]['stop_loss'] = saved['stop_loss']
+                        print(f"[{sym}] Restored from file: {saved['units_held']} units, SL: {saved['stop_loss']:.0f}")
+                    else:
+                        # 파일 없으면 평균가 기반으로 추정 (재시작 전 파일이 없던 경우)
+                        unit_size = self.state[sym]['unit_size']
+                        units_held = max(1, qty // unit_size) if unit_size > 0 else 1
+                        self.state[sym]['total_qty'] = qty
+                        self.state[sym]['units_held'] = units_held
+                        self.state[sym]['last_entry_price'] = avg_price
+                        self.state[sym]['stop_loss'] = avg_price - (2 * self.state[sym]['n'])
+                        print(f"[{sym}] Estimated from avg: {units_held} units, SL: {self.state[sym]['stop_loss']:.0f}")
         
         return True
 
+    def _load_saved_positions(self):
+        """positions.json에서 저장된 포지션 상태를 불러옵니다."""
+        if not os.path.isfile(POSITIONS_FILE):
+            return {}
+        try:
+            with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_position(self, symbol):
+        """단일 종목의 포지션 상태를 positions.json에 저장합니다."""
+        saved = self._load_saved_positions()
+        s = self.state[symbol]
+        if s['units_held'] == 0:
+            saved.pop(symbol, None)  # 청산 완료 시 항목 삭제
+        else:
+            saved[symbol] = {
+                'units_held': s['units_held'],
+                'total_qty': s['total_qty'],
+                'last_entry_price': s['last_entry_price'],
+                'stop_loss': s['stop_loss'],
+            }
+        with open(POSITIONS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(saved, f, ensure_ascii=False, indent=2)
+
     def update_position(self, symbol, action, qty, price):
-        """주문 체결 후 내부 상태 업데이트"""
+        """주문 체결 후 내부 상태 업데이트 및 파일 저장"""
         if symbol not in self.state: return
         s = self.state[symbol]
-        
+
         if action == "BUY":
             s['total_qty'] += qty
             s['units_held'] += 1
@@ -117,6 +156,8 @@ class TurtleStrategy:
                 s['units_held'] = 0
                 s['last_entry_price'] = 0
                 s['stop_loss'] = 0
+
+        self._save_position(symbol)
 
     def check_signals(self, symbol, current_price):
         """실시간 현재가를 받아 매매 신호를 발생시킵니다."""

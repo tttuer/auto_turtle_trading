@@ -1,4 +1,7 @@
 import asyncio
+import csv
+import os
+# pyrefly: ignore [missing-import]
 import websockets
 import json
 import time
@@ -15,6 +18,7 @@ class TradingBot:
         self.strategy = TurtleStrategy(self.kis)
         self.is_running = True
         self.ws_approval_key = None
+        self._pending_symbols = set()  # 주문 처리 중인 종목 (중복 주문 방지)
 
     def _get_ws_approval_key(self):
         """웹소켓 접속용 Approval Key 발급"""
@@ -92,21 +96,30 @@ class TradingBot:
                                     except ValueError:
                                         continue
                                     
+                                    if symbol in self._pending_symbols:
+                                        continue  # 이미 주문 처리 중인 종목은 스킵
+
                                     # 전략 모듈에 현재가 전달하여 매매 신호 확인
                                     signal = self.strategy.check_signals(symbol, current_price)
                                     if signal:
                                         action = signal['action']
                                         qty = signal['qty']
                                         reason = signal['reason']
-                                        
+
                                         if qty > 0:
                                             print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol} | {action} | Qty: {qty} | Price: {current_price} | {reason}")
-                                            
-                                            # 시장가 주문 전송 (01: 시장가)
-                                            order_res = self.kis.place_order(symbol, action, qty, order_type="01")
-                                            if order_res and order_res.get('rt_cd') == '0':
-                                                # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
-                                                self.strategy.update_position(symbol, action, qty, current_price)
+
+                                            self._pending_symbols.add(symbol)
+                                            try:
+                                                # 시장가 주문 전송 (01: 시장가)
+                                                order_res = self.kis.place_order(symbol, action, qty, order_type="01")
+                                                if order_res and order_res.get('rt_cd') == '0':
+                                                    # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
+                                                    self.strategy.update_position(symbol, action, qty, current_price)
+                                                    self.log_trade(symbol, action, qty, current_price, reason)
+                                                    self.send_telegram_alert(symbol, action, qty, current_price, reason)
+                                            finally:
+                                                self._pending_symbols.discard(symbol)
 
             except websockets.ConnectionClosed as e:
                 print(f"\n[WebSocket] Connection Closed: {e}. Reconnecting in 5 seconds...")
@@ -114,6 +127,50 @@ class TradingBot:
             except Exception as e:
                 print(f"\n[WebSocket] Unexpected Error: {e}. Reconnecting in 5 seconds...")
                 await asyncio.sleep(5)
+
+    def send_telegram_alert(self, symbol, action, qty, price, reason):
+        """매매 체결 시 텔레그램으로 알림을 전송합니다."""
+        if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_CHAT_ID:
+            return
+        s = self.strategy.state.get(symbol, {})
+        units_held = s.get('units_held', '-')
+        stop_loss = s.get('stop_loss', 0)
+        emoji = "🟢" if action == "BUY" else "🔴"
+        action_str = "매수" if action == "BUY" else "매도"
+        lines = [
+            f"{emoji} {action_str} | {symbol}",
+            f"수량: {qty}주 @ {price:,.0f}원",
+            f"사유: {reason}",
+        ]
+        if action == "BUY":
+            lines.append(f"유닛: {units_held}/{Config.MAX_UNITS} | 손절가: {stop_loss:,.0f}원")
+        text = "\n".join(lines)
+        try:
+            url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(url, data={"chat_id": Config.TELEGRAM_CHAT_ID, "text": text}, timeout=5)
+        except Exception:
+            pass
+
+    def log_trade(self, symbol, action, qty, price, reason):
+        """매매 체결 기록을 trade_history.csv에 저장합니다."""
+        filepath = "trade_history.csv"
+        file_exists = os.path.isfile(filepath)
+        s = self.strategy.state.get(symbol, {})
+        row = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'symbol': symbol,
+            'action': action,
+            'qty': qty,
+            'price': price,
+            'reason': reason,
+            'units_held': s.get('units_held', ''),
+            'stop_loss': round(s.get('stop_loss', 0)),
+        }
+        with open(filepath, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
 
     def log_balance(self):
         """주기적으로 계좌 잔액을 확인하고 CSV 파일로 기록합니다."""
