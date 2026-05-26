@@ -85,6 +85,24 @@ class KISClient:
             print(f"[KIS] Error fetching ohlcv for {symbol}: {res.text}")
             return []
 
+    def get_stock_name(self, symbol):
+        """종목 코드로 종목명을 API에서 조회합니다."""
+        url = f"{Config.REST_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = self.get_common_headers("FHKST01010100")
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol
+        }
+        res = requests.get(url, headers=headers, params=params)
+        if res.status_code == 200:
+            data = res.json()
+            # hts_kor_isnm: HTS 한글 종목명
+            name = data.get('output', {}).get('hts_kor_isnm')
+            return name if name else symbol
+        else:
+            print(f"[KIS] Error fetching name for {symbol}: {res.text}")
+            return symbol
+
     def place_order(self, symbol, side, qty, price=0, order_type="01"):
         """매수/매도 주문 (시장가 기본)"""
         url = f"{Config.REST_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"

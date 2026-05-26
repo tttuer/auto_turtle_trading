@@ -19,6 +19,7 @@ class TradingBot:
         self.is_running = True
         self.ws_approval_key = None
         self._pending_symbols = set()  # 주문 처리 중인 종목 (중복 주문 방지)
+        self.symbol_names = {}
 
     def _get_ws_approval_key(self):
         """웹소켓 접속용 Approval Key 발급"""
@@ -42,6 +43,12 @@ class TradingBot:
         print("\n[Bot] Running Daily Initialization...")
         self.kis.issue_token()
         self.ws_approval_key = self._get_ws_approval_key()
+        
+        # 관심 종목명 미리 조회하여 캐싱
+        for sym in Config.get_universe():
+            self.symbol_names[sym] = self.kis.get_stock_name(sym)
+            time.sleep(0.1) # API 호출 제한 방지
+            
         # 장 시작 전 동적 자산 바탕으로 기준가 및 Unit 계산
         self.strategy.prepare_daily_data()
 
@@ -107,7 +114,8 @@ class TradingBot:
                                         reason = signal['reason']
 
                                         if qty > 0:
-                                            print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol} | {action} | Qty: {qty} | Price: {current_price} | {reason}")
+                                            symbol_name = self.symbol_names.get(symbol, symbol)
+                                            print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol_name} ({symbol}) | {action} | Qty: {qty} | Price: {current_price} | {reason}")
 
                                             self._pending_symbols.add(symbol)
                                             try:
@@ -137,8 +145,9 @@ class TradingBot:
         stop_loss = s.get('stop_loss', 0)
         emoji = "🟢" if action == "BUY" else "🔴"
         action_str = "매수" if action == "BUY" else "매도"
+        symbol_name = self.symbol_names.get(symbol, symbol)
         lines = [
-            f"{emoji} {action_str} | {symbol}",
+            f"{emoji} {action_str} | {symbol_name} ({symbol})",
             f"수량: {qty}주 @ {price:,.0f}원",
             f"사유: {reason}",
         ]
