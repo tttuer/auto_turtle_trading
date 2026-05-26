@@ -1,5 +1,6 @@
 import os
 import json
+import FinanceDataReader as fdr
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,11 +34,37 @@ class Config:
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
     # Universe
+    _universe_cache = None
+
     @classmethod
     def get_universe(cls):
+        if cls._universe_cache is not None:
+            return cls._universe_cache
+            
         try:
-            with open("universe.json", "r") as f:
-                data = json.load(f)
-                return data.get("target_symbols", [])
-        except FileNotFoundError:
+            print("[Config] Fetching KOSPI top 10 stocks...")
+            df = fdr.StockListing('KOSPI')
+            
+            # 우선주 필터링 (종목명에 '우' 또는 '우B' 등이 포함된 것 제외)
+            # 종목코드가 '0'으로 끝나지 않는 경우도 주로 우선주/스팩/펀드 등
+            target_symbols = []
+            for _, row in df.iterrows():
+                code = row['Code']
+                name = row['Name']
+                
+                # 이름 끝이 '우', '우B', '스팩' 등인 경우 제외
+                if name.endswith('우') or name.endswith('우B') or '스팩' in name:
+                    continue
+                    
+                target_symbols.append(code)
+                
+                if len(target_symbols) >= 10:
+                    break
+                    
+            cls._universe_cache = target_symbols
+            print(f"[Config] Selected Top 10 Universe: {cls._universe_cache}")
+            return cls._universe_cache
+            
+        except Exception as e:
+            print(f"[Config] Error fetching universe: {e}")
             return []

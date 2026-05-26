@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "finance-datareader>=0.9.202",
     "pandas>=3.0.3",
     "python-dotenv>=1.2.2",
     "pytz>=2026.2",
