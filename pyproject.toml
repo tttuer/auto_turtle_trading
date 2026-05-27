@@ -11,5 +11,6 @@ dependencies = [
     "pytz>=2026.2",
     "requests>=2.34.0",
     "schedule>=1.2.2",
+    "setuptools<70.0.0",
     "websockets>=16.0",
 ]
