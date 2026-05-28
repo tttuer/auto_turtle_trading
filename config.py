@@ -35,6 +35,7 @@ class Config:
 
     # Universe
     _universe_cache = None
+    _name_cache = {}  # 종목코드 -> 종목명 캐시
 
     @classmethod
     def get_universe(cls):
@@ -62,6 +63,9 @@ class Config:
             kospi_df = fdr.StockListing('KOSPI')
             # 결측치나 이상치가 있을 수 있으니 안전하게 순서 리스트화
             kospi_sorted_codes = kospi_df['Code'].tolist()
+            # 종목코드 -> 종목명 캐싱 (Name 컬럼 활용)
+            if 'Name' in kospi_df.columns:
+                cls._name_cache = kospi_df.set_index('Code')['Name'].to_dict()
             
             target_symbols = []
             

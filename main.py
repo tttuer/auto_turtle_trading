@@ -44,10 +44,9 @@ class TradingBot:
         self.kis.issue_token()
         self.ws_approval_key = self._get_ws_approval_key()
         
-        # 관심 종목명 미리 조회하여 캐싱
+        # 관심 종목명 캐싱 (FDR 데이터 활용, API 호출 불필요)
         for sym in Config.get_universe():
-            self.symbol_names[sym] = self.kis.get_stock_name(sym)
-            time.sleep(0.1) # API 호출 제한 방지
+            self.symbol_names[sym] = Config._name_cache.get(sym, sym)
             
         # 장 시작 전 동적 자산 바탕으로 기준가 및 Unit 계산
         self.strategy.prepare_daily_data()
