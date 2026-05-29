@@ -57,6 +57,86 @@ class TradingBot:
         
         self.strategy.prepare_daily_data()
 
+    def _parse_ws_message(self, msg):
+        """웹소켓 메시지를 파싱하여 (종목코드, 현재가)를 반환합니다."""
+        if not isinstance(msg, str) or not (msg.startswith('0|') or msg.startswith('1|')):
+            return None, None
+            
+        parts = msg.split('|')
+        if len(parts) < 4:
+            return None, None
+            
+        data_fields = parts[3].split('^')
+        if len(data_fields) <= 2:
+            return None, None
+            
+        symbol = data_fields[0]
+        try:
+            current_price = float(data_fields[2])
+            return symbol, current_price
+        except ValueError:
+            return None, None
+
+    def _adjust_buy_qty(self, symbol, symbol_name, qty, current_price):
+        """매수 시 현금 부족 여부를 확인하고 수량을 조절합니다."""
+        if self.available_cash <= 0:
+            adjusted_qty = 0
+        else:
+            est_cost = qty * current_price
+            if est_cost > self.available_cash:
+                adjusted_qty = int(self.available_cash // current_price)
+            else:
+                adjusted_qty = qty
+
+        if adjusted_qty < qty:
+            if adjusted_qty <= 0:
+                now = time.time()
+                if now - self._last_no_cash_log.get(symbol, 0) > 300: # 5분 제한
+                    print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} ({symbol}) 매수 신호 스킵 (보유현금: {self.available_cash:,.0f}원)")
+                    self._last_no_cash_log[symbol] = now
+                return 0
+            print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} 수량 조절 ({qty}주 -> {adjusted_qty}주)")
+            
+        return adjusted_qty
+
+    def _execute_signal(self, symbol, current_price, signal):
+        """매매 신호에 따라 주문을 실행하고 상태를 업데이트합니다."""
+        action = signal['action']
+        qty = signal['qty']
+        reason = signal['reason']
+
+        if qty <= 0:
+            return
+
+        symbol_name = self.symbol_names.get(symbol, symbol)
+        
+        # 매수 시 현금 부족 방어 및 부분 매수 로직
+        if action == "BUY":
+            qty = self._adjust_buy_qty(symbol, symbol_name, qty, current_price)
+            if qty <= 0:
+                return
+
+        print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol_name} ({symbol}) | {action} | Qty: {qty} | Price: {current_price} | {reason}")
+
+        self._pending_symbols.add(symbol)
+        try:
+            # 시장가 주문 전송 (01: 시장가)
+            order_res = self.kis.place_order(symbol, action, qty, order_type="01")
+            if order_res and order_res.get('rt_cd') == '0':
+                # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
+                self.strategy.update_position(symbol, action, qty, current_price)
+                
+                # 로컬 현금(available_cash) 동기화
+                if action == "BUY":
+                    self.available_cash -= (qty * current_price)
+                elif action == "SELL":
+                    self.available_cash += (qty * current_price)
+                    
+                self.log_trade(symbol, action, qty, current_price, reason)
+                self.send_telegram_alert(symbol, action, qty, current_price, reason)
+        finally:
+            self._pending_symbols.discard(symbol)
+
     async def ws_loop(self):
         if not self.ws_approval_key:
             print("[WebSocket] No approval key. Exiting WS loop.")
@@ -93,76 +173,17 @@ class TradingBot:
                     while self.is_running:
                         msg = await ws.recv()
                         
-                        # 응답 메시지 파싱 (KIS 웹소켓 규격: 0|tr_id|개수|데이터)
-                        if isinstance(msg, str) and (msg.startswith('0|') or msg.startswith('1|')):
-                            parts = msg.split('|')
-                            if len(parts) >= 4:
-                                data_str = parts[3]
-                                data_fields = data_str.split('^')
-                                
-                                # data_fields[0]: 종목코드, [1]: 체결시간, [2]: 현재가
-                                if len(data_fields) > 2:
-                                    symbol = data_fields[0]
-                                    try:
-                                        current_price = float(data_fields[2])
-                                    except ValueError:
-                                        continue
-                                    
-                                    if symbol in self._pending_symbols:
-                                        continue  # 이미 주문 처리 중인 종목은 스킵
+                        symbol, current_price = self._parse_ws_message(msg)
+                        if not symbol:
+                            continue
+                            
+                        if symbol in self._pending_symbols:
+                            continue  # 이미 주문 처리 중인 종목은 스킵
 
-                                    # 전략 모듈에 현재가 전달하여 매매 신호 확인
-                                    signal = self.strategy.check_signals(symbol, current_price)
-                                    if signal:
-                                        action = signal['action']
-                                        qty = signal['qty']
-                                        reason = signal['reason']
-
-                                        if qty > 0:
-                                            symbol_name = self.symbol_names.get(symbol, symbol)
-                                            
-                                            # 매수 시 현금 부족 방어 및 부분 매수 로직
-                                            if action == "BUY":
-                                                if self.available_cash <= 0:
-                                                    adjusted_qty = 0
-                                                else:
-                                                    est_cost = qty * current_price
-                                                    if est_cost > self.available_cash:
-                                                        adjusted_qty = int(self.available_cash // current_price)
-                                                    else:
-                                                        adjusted_qty = qty
-
-                                                if adjusted_qty < qty:
-                                                    if adjusted_qty <= 0:
-                                                        now = time.time()
-                                                        if now - self._last_no_cash_log.get(symbol, 0) > 300: # 5분 제한
-                                                            print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} ({symbol}) 매수 신호 스킵 (보유현금: {self.available_cash:,.0f}원)")
-                                                            self._last_no_cash_log[symbol] = now
-                                                        continue
-                                                    # 현금이 1주 이상 살 수 있으면 부분 매수
-                                                    print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} 수량 조절 ({qty}주 -> {adjusted_qty}주)")
-                                                    qty = adjusted_qty
-
-                                            print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol_name} ({symbol}) | {action} | Qty: {qty} | Price: {current_price} | {reason}")
-
-                                            self._pending_symbols.add(symbol)
-                                            try:
-                                                # 시장가 주문 전송 (01: 시장가)
-                                                order_res = self.kis.place_order(symbol, action, qty, order_type="01")
-                                                if order_res and order_res.get('rt_cd') == '0':
-                                                    # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
-                                                    self.strategy.update_position(symbol, action, qty, current_price)
-                                                    
-                                                    # 로컬 현금(available_cash) 동기화
-                                                    if action == "BUY":
-                                                        self.available_cash -= (qty * current_price)
-                                                    elif action == "SELL":
-                                                        self.available_cash += (qty * current_price)
-                                                        
-                                                    self.log_trade(symbol, action, qty, current_price, reason)
-                                                    self.send_telegram_alert(symbol, action, qty, current_price, reason)
-                                            finally:
-                                                self._pending_symbols.discard(symbol)
+                        # 전략 모듈에 현재가 전달하여 매매 신호 확인
+                        signal = self.strategy.check_signals(symbol, current_price)
+                        if signal:
+                            self._execute_signal(symbol, current_price, signal)
 
             except websockets.ConnectionClosed as e:
                 print(f"\n[WebSocket] Connection Closed: {e}. Reconnecting in 5 seconds...")
