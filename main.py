@@ -20,6 +20,8 @@ class TradingBot:
         self.ws_approval_key = None
         self._pending_symbols = set()  # 주문 처리 중인 종목 (중복 주문 방지)
         self.symbol_names = {}
+        self.available_cash = 0
+        self._last_no_cash_log = {}
 
     def _get_ws_approval_key(self):
         """웹소켓 접속용 Approval Key 발급"""
@@ -49,6 +51,10 @@ class TradingBot:
             self.symbol_names[sym] = Config._name_cache.get(sym, sym)
             
         # 장 시작 전 동적 자산 바탕으로 기준가 및 Unit 계산
+        balance_info = self.kis.get_balance()
+        if balance_info:
+            self.available_cash = balance_info.get('available_cash', 0)
+        
         self.strategy.prepare_daily_data()
 
     async def ws_loop(self):
@@ -114,6 +120,22 @@ class TradingBot:
 
                                         if qty > 0:
                                             symbol_name = self.symbol_names.get(symbol, symbol)
+                                            
+                                            # 매수 시 현금 부족 방어 및 부분 매수 로직
+                                            if action == "BUY":
+                                                est_cost = qty * current_price
+                                                if est_cost > self.available_cash:
+                                                    adjusted_qty = int(self.available_cash // current_price)
+                                                    if adjusted_qty == 0:
+                                                        now = time.time()
+                                                        if now - self._last_no_cash_log.get(symbol, 0) > 300: # 5분 제한
+                                                            print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} ({symbol}) 매수 신호 스킵 (보유현금: {self.available_cash:,.0f}원)")
+                                                            self._last_no_cash_log[symbol] = now
+                                                        continue
+                                                    # 현금이 1주 이상 살 수 있으면 부분 매수
+                                                    print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} 수량 조절 ({qty}주 -> {adjusted_qty}주)")
+                                                    qty = adjusted_qty
+
                                             print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol_name} ({symbol}) | {action} | Qty: {qty} | Price: {current_price} | {reason}")
 
                                             self._pending_symbols.add(symbol)
@@ -123,6 +145,13 @@ class TradingBot:
                                                 if order_res and order_res.get('rt_cd') == '0':
                                                     # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
                                                     self.strategy.update_position(symbol, action, qty, current_price)
+                                                    
+                                                    # 로컬 현금(available_cash) 동기화
+                                                    if action == "BUY":
+                                                        self.available_cash -= (qty * current_price)
+                                                    elif action == "SELL":
+                                                        self.available_cash += (qty * current_price)
+                                                        
                                                     self.log_trade(symbol, action, qty, current_price, reason)
                                                     self.send_telegram_alert(symbol, action, qty, current_price, reason)
                                             finally:

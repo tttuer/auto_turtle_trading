@@ -35,11 +35,21 @@ class TurtleStrategy:
         # N (20일 ATR) 계산
         df['n'] = df['tr'].ewm(span=20, adjust=False).mean()
         
-        # 20일 고점 및 10일 저점 (당일 장중 돌파를 확인하기 위해 shift(1) 적용하여 전일까지의 고/저점 사용)
-        df['high_20'] = df['high'].shift(1).rolling(window=20).max()
-        df['low_10'] = df['low'].shift(1).rolling(window=10).min()
+        import time
+        today_str = time.strftime('%Y%m%d')
+        last_date = df.iloc[-1]['date']
         
-        latest = df.iloc[-1] # 어제 종가 기준 (당일 데이터는 아직 미완성)
+        # 20일 고점 및 10일 저점 (당일 장중 돌파를 확인하기 위해 전일까지의 고/저점 사용)
+        if last_date == today_str:
+            # 마지막 봉이 오늘 데이터인 경우 (장중 조회), 어제까지의 데이터를 기준으로 계산
+            df['high_20'] = df['high'].shift(1).rolling(window=20).max()
+            df['low_10'] = df['low'].shift(1).rolling(window=10).min()
+        else:
+            # 마지막 봉이 어제(또는 과거) 데이터인 경우 (장 시작 전 조회), 그대로 계산에 포함
+            df['high_20'] = df['high'].rolling(window=20).max()
+            df['low_10'] = df['low'].rolling(window=10).min()
+        
+        latest = df.iloc[-1] # 기준일 데이터
         return {
             'n': latest['n'],
             'high_20': latest['high_20'],

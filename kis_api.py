@@ -59,8 +59,10 @@ class KISClient:
             try:
                 # tot_evlu_amt: 총 평가 금액 (예수금 + 주식평가금액)
                 total_equity = float(data['output2'][0]['tot_evlu_amt'])
+                # prvs_rcdl_excc_amt: D+2 가수도 정산금액 (실질적인 매수 가능 예수금)
+                available_cash = float(data['output2'][0]['prvs_rcdl_excc_amt'])
                 holdings = data['output1'] # list of holdings
-                return {"total_equity": total_equity, "holdings": holdings}
+                return {"total_equity": total_equity, "available_cash": available_cash, "holdings": holdings}
             except (KeyError, IndexError) as e:
                 print(f"[KIS] Parsing balance failed: {e}")
                 return None
