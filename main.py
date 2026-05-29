@@ -123,10 +123,17 @@ class TradingBot:
                                             
                                             # 매수 시 현금 부족 방어 및 부분 매수 로직
                                             if action == "BUY":
-                                                est_cost = qty * current_price
-                                                if est_cost > self.available_cash:
-                                                    adjusted_qty = int(self.available_cash // current_price)
-                                                    if adjusted_qty == 0:
+                                                if self.available_cash <= 0:
+                                                    adjusted_qty = 0
+                                                else:
+                                                    est_cost = qty * current_price
+                                                    if est_cost > self.available_cash:
+                                                        adjusted_qty = int(self.available_cash // current_price)
+                                                    else:
+                                                        adjusted_qty = qty
+
+                                                if adjusted_qty < qty:
+                                                    if adjusted_qty <= 0:
                                                         now = time.time()
                                                         if now - self._last_no_cash_log.get(symbol, 0) > 300: # 5분 제한
                                                             print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} ({symbol}) 매수 신호 스킵 (보유현금: {self.available_cash:,.0f}원)")
