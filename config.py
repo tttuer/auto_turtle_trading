@@ -23,11 +23,23 @@ class Config:
         REST_BASE_URL = "https://openapi.koreainvestment.com:9443"
         WS_BASE_URL = "ws://ops.koreainvestment.com:21000"
 
-    # Strategy Params (System 1)
+    # Turtle Trading Params (System 1)
     ENTRY_DAYS = 20
     EXIT_DAYS = 10
     RISK_PERCENT = 0.01  # 1%
     MAX_UNITS = 4
+
+    # Capital Allocation (Turtle vs Mean Reversion)
+    TURTLE_CAPITAL_RATIO = 0.60  # 60% for trend following
+    MR_CAPITAL_RATIO = 0.40      # 40% for mean reversion
+
+    # Mean Reversion Strategy Params
+    RSI_PERIOD = 14
+    BB_PERIOD = 20
+    BB_STD = 2.0
+    MR_RSI_OVERSOLD = 35
+    MR_STOP_LOSS_PCT = 0.05   # 5% stop loss
+    MR_MAX_HOLD_DAYS = 10     # max 10 trading days
     
     # Telegram
     TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")

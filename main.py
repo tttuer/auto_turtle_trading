@@ -11,11 +11,13 @@ from threading import Thread
 from config import Config
 from kis_api import KISClient
 from strategy import TurtleStrategy
+from mean_reversion_strategy import MeanReversionStrategy
 
 class TradingBot:
     def __init__(self):
         self.kis = KISClient()
         self.strategy = TurtleStrategy(self.kis)
+        self.mr_strategy = MeanReversionStrategy(self.kis)
         self.is_running = True
         self.ws_approval_key = None
         self._pending_symbols = set()  # 주문 처리 중인 종목 (중복 주문 방지)
@@ -56,6 +58,7 @@ class TradingBot:
             self.available_cash = balance_info.get('available_cash', 0)
         
         self.strategy.prepare_daily_data()
+        self.mr_strategy.prepare_daily_data()
 
     def _parse_ws_message(self, msg):
         """웹소켓 메시지를 파싱하여 (종목코드, 현재가)를 반환합니다."""
@@ -99,7 +102,7 @@ class TradingBot:
             
         return adjusted_qty
 
-    def _execute_signal(self, symbol, current_price, signal):
+    def _execute_signal(self, symbol, current_price, signal, strategy_type="TURTLE"):
         """매매 신호에 따라 주문을 실행하고 상태를 업데이트합니다."""
         action = signal['action']
         qty = signal['qty']
@@ -109,14 +112,14 @@ class TradingBot:
             return
 
         symbol_name = self.symbol_names.get(symbol, symbol)
-        
+
         # 매수 시 현금 부족 방어 및 부분 매수 로직
         if action == "BUY":
             qty = self._adjust_buy_qty(symbol, symbol_name, qty, current_price)
             if qty <= 0:
                 return
 
-        print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [SIGNAL] {symbol_name} ({symbol}) | {action} | Qty: {qty} | Price: {current_price} | {reason}")
+        print(f"\n[{time.strftime('%H:%M:%S')}] 🚨 [{strategy_type}] {symbol_name} ({symbol}) | {action} | Qty: {qty} | Price: {current_price} | {reason}")
 
         self._pending_symbols.add(symbol)
         try:
@@ -124,16 +127,19 @@ class TradingBot:
             order_res = self.kis.place_order(symbol, action, qty, order_type="01")
             if order_res and order_res.get('rt_cd') == '0':
                 # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
-                self.strategy.update_position(symbol, action, qty, current_price)
-                
+                if strategy_type == "TURTLE":
+                    self.strategy.update_position(symbol, action, qty, current_price)
+                else:
+                    self.mr_strategy.update_position(symbol, action, qty, current_price)
+
                 # 로컬 현금(available_cash) 동기화
                 if action == "BUY":
                     self.available_cash -= (qty * current_price)
                 elif action == "SELL":
                     self.available_cash += (qty * current_price)
-                    
-                self.log_trade(symbol, action, qty, current_price, reason)
-                self.send_telegram_alert(symbol, action, qty, current_price, reason)
+
+                self.log_trade(symbol, action, qty, current_price, reason, strategy_type)
+                self.send_telegram_alert(symbol, action, qty, current_price, reason, strategy_type)
         finally:
             self._pending_symbols.discard(symbol)
 
@@ -180,10 +186,20 @@ class TradingBot:
                         if symbol in self._pending_symbols:
                             continue  # 이미 주문 처리 중인 종목은 스킵
 
-                        # 전략 모듈에 현재가 전달하여 매매 신호 확인
+                        # 터틀 전략 신호 확인
                         signal = self.strategy.check_signals(symbol, current_price)
                         if signal:
-                            self._execute_signal(symbol, current_price, signal)
+                            self._execute_signal(symbol, current_price, signal, "TURTLE")
+
+                        # 평균 회귀 전략 신호 확인 (터틀 포지션 보유 시 MR 신규 진입 스킵)
+                        if symbol not in self._pending_symbols:
+                            mr_signal = self.mr_strategy.check_signals(symbol, current_price)
+                            if mr_signal:
+                                turtle_has_position = self.strategy.state.get(symbol, {}).get('units_held', 0) > 0
+                                if mr_signal['action'] == 'BUY' and turtle_has_position:
+                                    mr_signal = None  # 터틀 포지션 중복 노출 방지
+                            if mr_signal:
+                                self._execute_signal(symbol, current_price, mr_signal, "MR")
 
             except websockets.ConnectionClosed as e:
                 print(f"\n[WebSocket] Connection Closed: {e}. Reconnecting in 5 seconds...")
@@ -192,23 +208,30 @@ class TradingBot:
                 print(f"\n[WebSocket] Unexpected Error: {e}. Reconnecting in 5 seconds...")
                 await asyncio.sleep(5)
 
-    def send_telegram_alert(self, symbol, action, qty, price, reason):
+    def send_telegram_alert(self, symbol, action, qty, price, reason, strategy_type="TURTLE"):
         """매매 체결 시 텔레그램으로 알림을 전송합니다."""
         if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_CHAT_ID:
             return
-        s = self.strategy.state.get(symbol, {})
-        units_held = s.get('units_held', '-')
-        stop_loss = s.get('stop_loss', 0)
         emoji = "🟢" if action == "BUY" else "🔴"
         action_str = "매수" if action == "BUY" else "매도"
+        strategy_label = "🐢터틀" if strategy_type == "TURTLE" else "📊평균회귀"
         symbol_name = self.symbol_names.get(symbol, symbol)
         lines = [
-            f"{emoji} {action_str} | {symbol_name} ({symbol})",
+            f"{emoji} [{strategy_label}] {action_str} | {symbol_name} ({symbol})",
             f"수량: {qty}주 @ {price:,.0f}원",
             f"사유: {reason}",
         ]
         if action == "BUY":
-            lines.append(f"유닛: {units_held}/{Config.MAX_UNITS} | 손절가: {stop_loss:,.0f}원")
+            if strategy_type == "TURTLE":
+                s = self.strategy.state.get(symbol, {})
+                units_held = s.get('units_held', '-')
+                stop_loss = s.get('stop_loss', 0)
+                lines.append(f"유닛: {units_held}/{Config.MAX_UNITS} | 손절가: {stop_loss:,.0f}원")
+            else:
+                s = self.mr_strategy.state.get(symbol, {})
+                stop_loss = price * (1 - Config.MR_STOP_LOSS_PCT)
+                bb_middle = s.get('bb_middle', 0)
+                lines.append(f"손절: {stop_loss:,.0f}원 | 목표: {bb_middle:,.0f}원(BB중심)")
         text = "\n".join(lines)
         try:
             url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -216,20 +239,28 @@ class TradingBot:
         except Exception:
             pass
 
-    def log_trade(self, symbol, action, qty, price, reason):
+    def log_trade(self, symbol, action, qty, price, reason, strategy_type="TURTLE"):
         """매매 체결 기록을 trade_history.csv에 저장합니다."""
         filepath = "trade_history.csv"
         file_exists = os.path.isfile(filepath)
-        s = self.strategy.state.get(symbol, {})
+        if strategy_type == "TURTLE":
+            s = self.strategy.state.get(symbol, {})
+            units_held = s.get('units_held', '')
+            stop_loss = round(s.get('stop_loss', 0))
+        else:
+            s = self.mr_strategy.state.get(symbol, {})
+            units_held = s.get('units_held', '')
+            stop_loss = round(price * (1 - Config.MR_STOP_LOSS_PCT)) if action == "BUY" else 0
         row = {
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'strategy': strategy_type,
             'symbol': symbol,
             'action': action,
             'qty': qty,
             'price': price,
             'reason': reason,
-            'units_held': s.get('units_held', ''),
-            'stop_loss': round(s.get('stop_loss', 0)),
+            'units_held': units_held,
+            'stop_loss': stop_loss,
         }
         with open(filepath, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=row.keys())

@@ -57,11 +57,12 @@ class TurtleStrategy:
             'close': latest['close']
         }
 
-    def calculate_unit_size(self, total_equity, n_value):
+    def calculate_unit_size(self, total_equity, n_value, capital_ratio=None):
         """현재 총 자산을 기준으로 1 Unit 수량을 계산합니다. (1% 룰)"""
         if pd.isna(n_value) or n_value <= 0:
             return 0
-        risk_amt = total_equity * Config.RISK_PERCENT
+        ratio = capital_ratio if capital_ratio is not None else Config.TURTLE_CAPITAL_RATIO
+        risk_amt = total_equity * ratio * Config.RISK_PERCENT
         unit_shares = int(risk_amt / n_value)
         return unit_shares
 
