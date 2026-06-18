@@ -29,11 +29,48 @@ class Config:
     RISK_PERCENT = 0.01  # 1%
     MAX_UNITS = 4
 
-    # Capital Allocation (Turtle vs Mean Reversion)
-    TURTLE_CAPITAL_RATIO = 0.60  # 60% for trend following
-    MR_CAPITAL_RATIO = 0.40      # 40% for mean reversion
+    # Strategy Switches
+    ENABLE_QUALITY_GARP = True
+    ENABLE_TURTLE_SLEEVE = True
+    ENABLE_MEAN_REVERSION = False  # 단기 회전율이 높아 기본 비활성화
 
-    # Mean Reversion Strategy Params
+    # Capital Allocation (Buffett/Lynch core + small trend sleeve)
+    QUALITY_GARP_CAPITAL_RATIO = 0.80  # long-term quality/GARP core
+    TURTLE_CAPITAL_RATIO = 0.10        # small trend-following sleeve
+    CASH_RESERVE_RATIO = 0.10          # dry powder for drawdowns
+    MR_CAPITAL_RATIO = 0.00            # disabled by default
+
+    # Quality/GARP Params (Buffett + Peter Lynch style)
+    ENABLE_FINANCIAL_DATA = True
+    DART_API_KEY = os.environ.get("DART_API_KEY", "")
+    FINANCIAL_CACHE_DB = os.environ.get("FINANCIAL_CACHE_DB", "financial_cache.db")
+    DART_CACHE_DAYS = 1
+    KRX_CACHE_DAYS = 1
+    CORE_MAX_POSITIONS = 8
+    CORE_MAX_POSITION_PCT = 0.12       # max 12% of equity per core holding
+    CORE_MIN_HOLD_DAYS = 60            # avoid short-term churn
+    CORE_COOLDOWN_DAYS = 20            # no quick re-buy after exit
+    CORE_MAX_NEW_BUYS_PER_DAY = 1
+    CORE_BUY_DISCOUNT_TO_HIGH = 0.15   # prefer buying at least 15% below 52w high
+    CORE_MIN_MOMENTUM_6M = -0.15       # avoid structurally broken names
+    CORE_MAX_DRAWDOWN_EXIT = 0.35      # review/exit if thesis proxy breaks badly
+    CORE_REBALANCE_HOUR = 14
+    CORE_REBALANCE_MINUTE = 50
+
+    # Manual quality weights until a fundamentals API is connected.
+    # Higher = better business quality / durability / circle-of-competence fit.
+    QUALITY_MANUAL_SCORES = {
+        "005930": 90,  # Samsung Electronics
+        "000660": 86,  # SK hynix
+        "005380": 82,  # Hyundai Motor
+        "000270": 82,  # Kia
+        "105560": 78,  # KB Financial
+        "055550": 78,  # Shinhan Financial
+        "035420": 76,  # NAVER
+        "207940": 80,  # Samsung Biologics
+    }
+
+    # Mean Reversion Strategy Params (legacy, disabled by default)
     RSI_PERIOD = 14
     BB_PERIOD = 20
     BB_STD = 2.0

@@ -12,16 +12,19 @@ from config import Config
 from kis_api import KISClient
 from strategy import TurtleStrategy
 from mean_reversion_strategy import MeanReversionStrategy
+from quality_garp_strategy import QualityGarpStrategy
 
 class TradingBot:
     def __init__(self):
         self.kis = KISClient()
+        self.core_strategy = QualityGarpStrategy(self.kis)
         self.strategy = TurtleStrategy(self.kis)
         self.mr_strategy = MeanReversionStrategy(self.kis)
         self.is_running = True
         self.ws_approval_key = None
         self._pending_symbols = set()  # 주문 처리 중인 종목 (중복 주문 방지)
         self.symbol_names = {}
+        self.total_equity = 0
         self.available_cash = 0
         self._last_no_cash_log = {}
 
@@ -55,10 +58,29 @@ class TradingBot:
         # 장 시작 전 동적 자산 바탕으로 기준가 및 Unit 계산
         balance_info = self.kis.get_balance()
         if balance_info:
+            self.total_equity = balance_info.get('total_equity', 0)
             self.available_cash = balance_info.get('available_cash', 0)
         
-        self.strategy.prepare_daily_data()
-        self.mr_strategy.prepare_daily_data()
+        if Config.ENABLE_QUALITY_GARP:
+            self.core_strategy.prepare_daily_data()
+        if Config.ENABLE_TURTLE_SLEEVE:
+            self.strategy.prepare_daily_data()
+        if Config.ENABLE_MEAN_REVERSION:
+            self.mr_strategy.prepare_daily_data()
+
+    def refresh_after_market_data(self):
+        """장 마감 후 다음 거래일에 사용할 재무/밸류에이션 캐시를 갱신합니다."""
+        print("\n[Bot] Refreshing after-market financial data...")
+        try:
+            self.kis.issue_token()
+            balance_info = self.kis.get_balance()
+            if balance_info:
+                self.total_equity = balance_info.get('total_equity', 0)
+                self.available_cash = balance_info.get('available_cash', 0)
+            if Config.ENABLE_QUALITY_GARP:
+                self.core_strategy.prepare_daily_data()
+        except Exception as e:
+            print(f"[Bot] After-market refresh failed: {e}")
 
     def _parse_ws_message(self, msg):
         """웹소켓 메시지를 파싱하여 (종목코드, 현재가)를 반환합니다."""
@@ -82,12 +104,15 @@ class TradingBot:
 
     def _adjust_buy_qty(self, symbol, symbol_name, qty, current_price):
         """매수 시 현금 부족 여부를 확인하고 수량을 조절합니다."""
-        if self.available_cash <= 0:
+        reserved_cash = self.total_equity * Config.CASH_RESERVE_RATIO
+        spendable_cash = max(0, self.available_cash - reserved_cash)
+
+        if spendable_cash <= 0:
             adjusted_qty = 0
         else:
             est_cost = qty * current_price
-            if est_cost > self.available_cash:
-                adjusted_qty = int(self.available_cash // current_price)
+            if est_cost > spendable_cash:
+                adjusted_qty = int(spendable_cash // current_price)
             else:
                 adjusted_qty = qty
 
@@ -95,7 +120,7 @@ class TradingBot:
             if adjusted_qty <= 0:
                 now = time.time()
                 if now - self._last_no_cash_log.get(symbol, 0) > 300: # 5분 제한
-                    print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} ({symbol}) 매수 신호 스킵 (보유현금: {self.available_cash:,.0f}원)")
+                    print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금/비축금 제한으로 {symbol_name} ({symbol}) 매수 신호 스킵 (가용현금: {spendable_cash:,.0f}원)")
                     self._last_no_cash_log[symbol] = now
                 return 0
             print(f"\n[{time.strftime('%H:%M:%S')}] ⚠️ 현금 부족으로 {symbol_name} 수량 조절 ({qty}주 -> {adjusted_qty}주)")
@@ -127,7 +152,9 @@ class TradingBot:
             order_res = self.kis.place_order(symbol, action, qty, order_type="01")
             if order_res and order_res.get('rt_cd') == '0':
                 # 주문 성공 시 내부 상태(수량, 진입가 등) 업데이트
-                if strategy_type == "TURTLE":
+                if strategy_type == "CORE":
+                    self.core_strategy.update_position(symbol, action, qty, current_price)
+                elif strategy_type == "TURTLE":
                     self.strategy.update_position(symbol, action, qty, current_price)
                 else:
                     self.mr_strategy.update_position(symbol, action, qty, current_price)
@@ -186,16 +213,29 @@ class TradingBot:
                         if symbol in self._pending_symbols:
                             continue  # 이미 주문 처리 중인 종목은 스킵
 
-                        # 터틀 전략 신호 확인
-                        signal = self.strategy.check_signals(symbol, current_price)
-                        if signal:
-                            self._execute_signal(symbol, current_price, signal, "TURTLE")
+                        core_has_position = self.core_strategy.state.get(symbol, {}).get('total_qty', 0) > 0
+                        turtle_has_position = self.strategy.state.get(symbol, {}).get('units_held', 0) > 0
 
-                        # 평균 회귀 전략 신호 확인 (터틀 포지션 보유 시 MR 신규 진입 스킵)
-                        if symbol not in self._pending_symbols:
+                        # Buffett/Lynch style core portfolio: slow, quality-first.
+                        if Config.ENABLE_QUALITY_GARP:
+                            core_signal = self.core_strategy.check_signals(symbol, current_price)
+                            if core_signal:
+                                if core_signal['action'] == 'BUY' and turtle_has_position:
+                                    core_signal = None
+                                if core_signal:
+                                    self._execute_signal(symbol, current_price, core_signal, "CORE")
+                                    core_has_position = self.core_strategy.state.get(symbol, {}).get('total_qty', 0) > 0
+
+                        # Small turtle sleeve only. Do not overlap with core holdings.
+                        if Config.ENABLE_TURTLE_SLEEVE and symbol not in self._pending_symbols and not core_has_position:
+                            signal = self.strategy.check_signals(symbol, current_price)
+                            if signal:
+                                self._execute_signal(symbol, current_price, signal, "TURTLE")
+
+                        # Legacy mean reversion is disabled by default due to high turnover.
+                        if Config.ENABLE_MEAN_REVERSION and symbol not in self._pending_symbols and not core_has_position:
                             mr_signal = self.mr_strategy.check_signals(symbol, current_price)
                             if mr_signal:
-                                turtle_has_position = self.strategy.state.get(symbol, {}).get('units_held', 0) > 0
                                 if mr_signal['action'] == 'BUY' and turtle_has_position:
                                     mr_signal = None  # 터틀 포지션 중복 노출 방지
                             if mr_signal:
@@ -214,7 +254,12 @@ class TradingBot:
             return
         emoji = "🟢" if action == "BUY" else "🔴"
         action_str = "매수" if action == "BUY" else "매도"
-        strategy_label = "🐢터틀" if strategy_type == "TURTLE" else "📊평균회귀"
+        if strategy_type == "CORE":
+            strategy_label = "장기코어"
+        elif strategy_type == "TURTLE":
+            strategy_label = "터틀"
+        else:
+            strategy_label = "평균회귀"
         symbol_name = self.symbol_names.get(symbol, symbol)
         lines = [
             f"{emoji} [{strategy_label}] {action_str} | {symbol_name} ({symbol})",
@@ -222,7 +267,10 @@ class TradingBot:
             f"사유: {reason}",
         ]
         if action == "BUY":
-            if strategy_type == "TURTLE":
+            if strategy_type == "CORE":
+                s = self.core_strategy.state.get(symbol, {})
+                lines.append(f"점수: {s.get('score', '-')} | 52주 고점 대비: {s.get('discount_to_high', 0):.1%}")
+            elif strategy_type == "TURTLE":
                 s = self.strategy.state.get(symbol, {})
                 units_held = s.get('units_held', '-')
                 stop_loss = s.get('stop_loss', 0)
@@ -243,7 +291,11 @@ class TradingBot:
         """매매 체결 기록을 trade_history.csv에 저장합니다."""
         filepath = "trade_history.csv"
         file_exists = os.path.isfile(filepath)
-        if strategy_type == "TURTLE":
+        if strategy_type == "CORE":
+            s = self.core_strategy.state.get(symbol, {})
+            units_held = 1 if action == "BUY" else ''
+            stop_loss = 0
+        elif strategy_type == "TURTLE":
             s = self.strategy.state.get(symbol, {})
             units_held = s.get('units_held', '')
             stop_loss = round(s.get('stop_loss', 0))
@@ -287,6 +339,7 @@ class TradingBot:
         """매일 특정 시간에 초기화 작업을 실행하는 스케줄러"""
         # 한국 시간 08:30에 매일 실행
         schedule.every().day.at("08:30").do(self.daily_init)
+        schedule.every().day.at("18:10").do(self.refresh_after_market_data)
         
         # 1시간마다 잔고 기록
         schedule.every(1).hours.do(self.log_balance)

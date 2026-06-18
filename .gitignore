@@ -13,7 +13,11 @@ wheels/
 .env
 balance_history.csv
 trade_history.csv
+financial_cache.db
+financial_cache.db-*
 positions.json
+core_positions.json
+mr_positions.json
 *.log
 .idea/
 .vscode/
