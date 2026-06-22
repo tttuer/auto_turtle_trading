@@ -63,6 +63,7 @@ class QualityGarpStrategy:
             entry_price = float(saved.get("entry_price", 0.0))
             entry_date = saved.get("entry_date", "")
             cooldown_until = saved.get("cooldown_until", "")
+            buy_stage = int(saved.get("buy_stage", 3 if qty > 0 else 0))
 
             financial_metrics = self.financials.get_metrics(symbol)
             score = self._score_candidate(symbol, metrics, financial_metrics)
@@ -71,11 +72,12 @@ class QualityGarpStrategy:
                 **financial_metrics,
                 "score": score,
                 "financial_score": self._financial_score(financial_metrics),
-                "unit_size": self._calculate_target_qty(total_equity, metrics["close"]),
+                "target_qty": self._calculate_target_qty(total_equity, metrics["close"]),
                 "total_qty": qty,
                 "entry_price": entry_price,
                 "entry_date": entry_date,
                 "cooldown_until": cooldown_until,
+                "buy_stage": buy_stage,
             }
             self.state[symbol] = state
             ranked.append((score, symbol))
@@ -89,10 +91,15 @@ class QualityGarpStrategy:
         return True
 
     def _calculate_price_metrics(self, symbol, data):
-        df = pd.DataFrame(data)
-        df = df[["stck_bsop_date", "stck_clpr", "stck_hgpr", "stck_lwpr"]]
+        raw = pd.DataFrame(data)
+        volume_col = next(
+            (col for col in ["acml_vol", "stck_vol", "cntg_vol", "tvol"] if col in raw.columns),
+            None,
+        )
+        df = raw[["stck_bsop_date", "stck_clpr", "stck_hgpr", "stck_lwpr"]].copy()
         df.columns = ["date", "close", "high", "low"]
-        df = df.astype({"close": float, "high": float, "low": float})
+        df["volume"] = raw[volume_col] if volume_col else 0
+        df = df.astype({"close": float, "high": float, "low": float, "volume": float})
         df = df.sort_values("date").reset_index(drop=True)
 
         today_str = time.strftime("%Y%m%d")
@@ -102,29 +109,83 @@ class QualityGarpStrategy:
         if len(df) < 60:
             return None
 
+        closes = df["close"]
         close = float(df.iloc[-1]["close"])
         lookback = min(252, len(df))
         momentum_lookback = min(120, len(df) - 1)
         high_52w = float(df["high"].tail(lookback).max())
         low_52w = float(df["low"].tail(lookback).min())
-        ma_60 = float(df["close"].tail(60).mean())
-        ma_120 = float(df["close"].tail(min(120, len(df))).mean())
-        momentum_6m = close / float(df["close"].iloc[-momentum_lookback]) - 1
+        ma_20 = float(closes.tail(20).mean())
+        ma_60 = float(closes.tail(60).mean())
+        ma_120 = float(closes.tail(min(120, len(df))).mean())
+        ma_200 = float(closes.tail(min(200, len(df))).mean())
+        momentum_6m = close / float(closes.iloc[-momentum_lookback]) - 1
         discount_to_high = 1 - (close / high_52w) if high_52w > 0 else 0
         drawdown_from_high = discount_to_high
-        volatility = float(df["close"].pct_change().tail(60).std() * np.sqrt(252))
+        volatility = float(closes.pct_change().tail(60).std() * np.sqrt(252))
+        rsi = self._calculate_rsi(closes)
+        macd, macd_signal = self._calculate_macd(closes)
+        bb_upper, bb_middle, bb_lower = self._calculate_bollinger(closes)
+        recent_bb_lower_touch = bool((closes.tail(10) <= self._bollinger_lower_series(closes).tail(10)).any())
+        avg_volume_20 = float(df["volume"].tail(20).mean())
+        latest_volume = float(df.iloc[-1]["volume"])
+        volume_ok = avg_volume_20 <= 0 or latest_volume >= avg_volume_20
 
         return {
             "close": close,
             "high_52w": high_52w,
             "low_52w": low_52w,
+            "ma_20": ma_20,
             "ma_60": ma_60,
             "ma_120": ma_120,
+            "ma_200": ma_200,
             "momentum_6m": momentum_6m,
             "discount_to_high": discount_to_high,
             "drawdown_from_high": drawdown_from_high,
             "volatility": volatility,
+            "rsi": rsi,
+            "macd": macd,
+            "macd_signal": macd_signal,
+            "bb_upper": bb_upper,
+            "bb_middle": bb_middle,
+            "bb_lower": bb_lower,
+            "recent_bb_lower_touch": recent_bb_lower_touch,
+            "avg_volume_20": avg_volume_20,
+            "latest_volume": latest_volume,
+            "volume_ok": volume_ok,
         }
+
+    def _calculate_rsi(self, prices, period=14):
+        delta = prices.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.ewm(span=period, adjust=False).mean()
+        avg_loss = loss.ewm(span=period, adjust=False).mean()
+        last_gain = float(avg_gain.iloc[-1])
+        last_loss = float(avg_loss.iloc[-1])
+        if last_loss == 0:
+            return 100.0 if last_gain > 0 else 50.0
+        rs = last_gain / last_loss
+        return float(100 - (100 / (1 + rs)))
+
+    def _calculate_macd(self, prices):
+        ema_12 = prices.ewm(span=12, adjust=False).mean()
+        ema_26 = prices.ewm(span=26, adjust=False).mean()
+        macd = ema_12 - ema_26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        return float(macd.iloc[-1]), float(signal.iloc[-1])
+
+    def _calculate_bollinger(self, prices, period=20, std_mult=2.0):
+        middle = prices.rolling(window=period).mean()
+        std = prices.rolling(window=period).std()
+        upper = middle + std_mult * std
+        lower = middle - std_mult * std
+        return float(upper.iloc[-1]), float(middle.iloc[-1]), float(lower.iloc[-1])
+
+    def _bollinger_lower_series(self, prices, period=20, std_mult=2.0):
+        middle = prices.rolling(window=period).mean()
+        std = prices.rolling(window=period).std()
+        return middle - std_mult * std
 
     def _manual_quality_score(self, symbol):
         return Config.QUALITY_MANUAL_SCORES.get(symbol, 65)
@@ -180,6 +241,24 @@ class QualityGarpStrategy:
             elif pbr > 5:
                 score -= 6
 
+        growth_candidates = [
+            metrics.get("revenue_growth"),
+            metrics.get("operating_income_growth"),
+            metrics.get("net_income_growth"),
+        ]
+        growth_values = [g for g in growth_candidates if g is not None and g > 0]
+        growth = sum(growth_values) / len(growth_values) if growth_values else None
+        if per and per > 0 and growth:
+            peg = per / (growth * 100)
+            if peg <= 1.0:
+                score += 10
+            elif peg <= 1.8:
+                score += 5
+            elif peg > 3.0:
+                score -= 8
+        elif per and per > 25 and not growth_values:
+            score -= 5
+
         return round(max(0, min(score, 100)), 2)
 
     def _range_score(self, value, low, high, min_points, max_points):
@@ -213,7 +292,12 @@ class QualityGarpStrategy:
 
         s = self.state[symbol]
         if s["total_qty"] > 0:
-            return self._check_exit_signal(symbol, current_price)
+            exit_signal = self._check_exit_signal(symbol, current_price)
+            if exit_signal:
+                return exit_signal
+            if s.get("buy_stage", 0) < len(Config.CORE_STAGE_WEIGHTS):
+                return self._check_entry_signal(symbol, current_price)
+            return None
         return self._check_entry_signal(symbol, current_price)
 
     def _check_entry_signal(self, symbol, current_price):
@@ -224,7 +308,7 @@ class QualityGarpStrategy:
             return None
         if s["cooldown_until"] and time.strftime("%Y%m%d") < s["cooldown_until"]:
             return None
-        if s["unit_size"] <= 0:
+        if s["target_qty"] <= 0:
             return None
 
         reasonably_priced = s["discount_to_high"] >= Config.CORE_BUY_DISCOUNT_TO_HIGH
@@ -232,13 +316,65 @@ class QualityGarpStrategy:
         trend_ok = current_price >= s["ma_120"] or current_price >= s["ma_60"]
         fundamentals_ok = self._fundamentals_ok(s)
 
-        if reasonably_priced and not_broken and trend_ok and fundamentals_ok:
+        if not (reasonably_priced and not_broken and fundamentals_ok):
+            return None
+
+        next_stage = s.get("buy_stage", 0) + 1
+        if next_stage == 1:
+            stage_ok = (
+                s["recent_bb_lower_touch"]
+                and current_price > s["bb_middle"]
+                and current_price > s["ma_20"]
+                and 40 <= s["rsi"] <= 65
+                and s["macd"] > s["macd_signal"]
+                and s["volume_ok"]
+            )
+        elif next_stage == 2:
+            stage_ok = (
+                current_price > s["ma_20"]
+                and s["ma_20"] > s["ma_60"]
+                and 45 <= s["rsi"] <= 65
+                and s["macd"] > s["macd_signal"]
+                and s["volume_ok"]
+            )
+        elif next_stage == 3:
+            stage_ok = (
+                trend_ok
+                and current_price > s["ma_60"]
+                and s["ma_20"] > s["ma_60"]
+                and 50 <= s["rsi"] <= 70
+                and s["macd"] > 0
+                and s["macd"] > s["macd_signal"]
+            )
+        else:
+            return None
+
+        if stage_ok:
+            qty = self._calculate_stage_qty(s, next_stage)
+            if qty <= 0:
+                return None
             return {
                 "action": "BUY",
-                "reason": f"CORE Quality/GARP score={s['score']}, fin={s.get('financial_score', 0)}, discount={s['discount_to_high']:.1%}",
-                "qty": s["unit_size"],
+                "reason": (
+                    f"CORE Stage {next_stage} Quality/GARP score={s['score']}, "
+                    f"fin={s.get('financial_score', 0)}, RSI={s['rsi']:.1f}, discount={s['discount_to_high']:.1%}"
+                ),
+                "qty": qty,
+                "stage": next_stage,
             }
         return None
+
+    def _calculate_stage_qty(self, state, stage):
+        weights = Config.CORE_STAGE_WEIGHTS
+        if stage < 1 or stage > len(weights):
+            return 0
+        target_qty = int(state["target_qty"])
+        if target_qty <= 0 or state["total_qty"] >= target_qty:
+            return 0
+        stage_qty = int(target_qty * weights[stage - 1])
+        if stage == len(weights):
+            stage_qty = target_qty - int(state["total_qty"])
+        return min(max(1, stage_qty), target_qty - int(state["total_qty"]))
 
     def _fundamentals_ok(self, state):
         if not Config.ENABLE_FINANCIAL_DATA:
@@ -249,6 +385,8 @@ class QualityGarpStrategy:
             if state.get("operating_margin") is not None and state["operating_margin"] < 0:
                 return False
             if state.get("debt_to_equity") is not None and state["debt_to_equity"] > 2.5:
+                return False
+            if state.get("financial_score", 0) < Config.CORE_STRONG_FINANCIAL_SCORE:
                 return False
         if state.get("per") is not None and state["per"] <= 0:
             return False
@@ -264,12 +402,28 @@ class QualityGarpStrategy:
         trend_broken = current_price < s["ma_120"] and s["momentum_6m"] < Config.CORE_MIN_MOMENTUM_6M
         no_longer_top_candidate = not s["rank_allowed"] and current_price < s["ma_120"]
         fundamentals_broken = not self._fundamentals_ok(s) and s.get("financial_year")
+        technical_weakness = current_price < s["ma_60"] and s["macd"] < s["macd_signal"] and s["rsi"] < 45
+        strong_break = (
+            current_price < s["ma_200"]
+            and s["ma_20"] < s["ma_60"]
+            and s["macd"] < 0
+            and s["rsi"] < 40
+            and (s["avg_volume_20"] <= 0 or s["latest_volume"] > s["avg_volume_20"] * 1.5)
+        )
 
-        if severe_break or trend_broken or no_longer_top_candidate or fundamentals_broken:
+        if fundamentals_broken or severe_break or strong_break:
+            qty = max(1, int(s["total_qty"] * Config.CORE_STRONG_SELL_PCT))
             return {
                 "action": "SELL",
-                "reason": f"CORE Thesis Proxy Broken (hold={hold_days}d, score={s['score']})",
-                "qty": s["total_qty"],
+                "reason": f"CORE Strong Exit (hold={hold_days}d, score={s['score']})",
+                "qty": min(qty, s["total_qty"]),
+            }
+        if trend_broken or no_longer_top_candidate or technical_weakness:
+            qty = max(1, int(s["total_qty"] * Config.CORE_PARTIAL_SELL_PCT))
+            return {
+                "action": "SELL",
+                "reason": f"CORE Trim Weakness (hold={hold_days}d, score={s['score']})",
+                "qty": min(qty, s["total_qty"]),
             }
         return None
 
@@ -293,12 +447,15 @@ class QualityGarpStrategy:
             s["entry_price"] = price
             s["entry_date"] = time.strftime("%Y%m%d")
             s["cooldown_until"] = ""
+            s["buy_stage"] = min(len(Config.CORE_STAGE_WEIGHTS), s.get("buy_stage", 0) + 1)
             self._new_buys_today += 1
         elif action == "SELL":
-            s["total_qty"] = 0
-            s["entry_price"] = 0.0
-            s["entry_date"] = ""
-            s["cooldown_until"] = self._future_business_day(Config.CORE_COOLDOWN_DAYS)
+            s["total_qty"] = max(0, s["total_qty"] - qty)
+            if s["total_qty"] == 0:
+                s["entry_price"] = 0.0
+                s["entry_date"] = ""
+                s["buy_stage"] = 0
+                s["cooldown_until"] = self._future_business_day(Config.CORE_COOLDOWN_DAYS)
 
         self._save_positions()
 
@@ -325,6 +482,7 @@ class QualityGarpStrategy:
                     "entry_price": s["entry_price"],
                     "entry_date": s["entry_date"],
                     "cooldown_until": s.get("cooldown_until", ""),
+                    "buy_stage": s.get("buy_stage", 0),
                 }
         with open(CORE_POSITIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(to_save, f, ensure_ascii=False, indent=2)

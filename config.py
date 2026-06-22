@@ -35,8 +35,8 @@ class Config:
     ENABLE_MEAN_REVERSION = False  # 단기 회전율이 높아 기본 비활성화
 
     # Capital Allocation (Buffett/Lynch core + small trend sleeve)
-    QUALITY_GARP_CAPITAL_RATIO = 0.80  # long-term quality/GARP core
-    TURTLE_CAPITAL_RATIO = 0.10        # small trend-following sleeve
+    QUALITY_GARP_CAPITAL_RATIO = 0.75  # long-term quality/GARP core
+    TURTLE_CAPITAL_RATIO = 0.05        # small trend-following sleeve
     CASH_RESERVE_RATIO = 0.10          # dry powder for drawdowns
     MR_CAPITAL_RATIO = 0.00            # disabled by default
 
@@ -54,6 +54,10 @@ class Config:
     CORE_BUY_DISCOUNT_TO_HIGH = 0.15   # prefer buying at least 15% below 52w high
     CORE_MIN_MOMENTUM_6M = -0.15       # avoid structurally broken names
     CORE_MAX_DRAWDOWN_EXIT = 0.35      # review/exit if thesis proxy breaks badly
+    CORE_STAGE_WEIGHTS = (0.40, 0.30, 0.30)
+    CORE_STRONG_FINANCIAL_SCORE = 68
+    CORE_PARTIAL_SELL_PCT = 0.30
+    CORE_STRONG_SELL_PCT = 0.70
     CORE_REBALANCE_HOUR = 14
     CORE_REBALANCE_MINUTE = 50
 
